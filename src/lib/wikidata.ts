@@ -59,11 +59,11 @@ export class WikidataError extends Error {
 
 // Responses are kept in Cache Storage for a week, so revisiting an era (or the
 // whole site) is instant. Wikidata changes slowly; a week-old answer is fine.
-const CACHE_NAME = 'chronoglobe-wdqs-v1'
+export const WDQS_CACHE = 'chronoglobe-wdqs-v1'
 const CACHE_TTL_MS = 7 * 24 * 3600 * 1000
 
 export async function fetchJson(url: string, headers: Record<string, string>, signal?: AbortSignal): Promise<any> {
-  const store = typeof caches !== 'undefined' ? await caches.open(CACHE_NAME).catch(() => null) : null
+  const store = typeof caches !== 'undefined' ? await caches.open(WDQS_CACHE).catch(() => null) : null
   const hit = await store?.match(url)
   if (hit && Date.now() - Number(hit.headers.get('x-cached-at')) < CACHE_TTL_MS) return hit.json()
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { Category, HistEvent } from '../types'
 import { CATEGORIES, CATEGORY_META } from '../lib/categories'
 import { fetchSummary, getThumb, type WikiSummary } from '../lib/wikipedia'
@@ -159,6 +159,13 @@ function HiddenGems({ events, onSelect, onHover }: { events: HistEvent[]; onSele
   const titles = useMemo(() => candidates.map((e) => e.title), [candidates])
   useThumbs(titles)
   const gems = candidates.filter((e) => getThumb(e.title)).slice(0, GEM_COUNT)
+  // Gems appear as their photos load, sometimes ahead of ones already shown;
+  // keep the row at its start so the first card lines up with the Spotlight.
+  const rowRef = useRef<HTMLDivElement>(null)
+  const gemKey = gems.map((e) => e.id).join()
+  useLayoutEffect(() => {
+    if (rowRef.current) rowRef.current.scrollLeft = 0
+  }, [gemKey])
   if (gems.length < 3) return null
 
   return (
@@ -172,7 +179,7 @@ function HiddenGems({ events, onSelect, onHover }: { events: HistEvent[]; onSele
           Shuffle
         </button>
       </header>
-      <div className="gem-row">
+      <div className="gem-row" ref={rowRef}>
         {gems.map((e) => (
           <button
             key={e.id}

@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { YearRange } from '../types'
 import {
   ERAS,
@@ -25,6 +25,9 @@ interface Props {
   marks?: number[]
   /** Year of the tick to highlight */
   activeMark?: number
+  /** "Load more here": force-load events in the area in view */
+  onLoadArea?: () => void
+  areaLoading?: boolean
 }
 
 type Drag = { kind: 'from' | 'to' } | { kind: 'move'; startYear: number; orig: YearRange }
@@ -61,7 +64,50 @@ function YearField({ value, onCommit, label }: { value: number; onCommit: (y: nu
   )
 }
 
-export function Timeline({ range, onChange, playing, onTogglePlay, speed, onSpeed, status, loading, marks, activeMark }: Props) {
+/** Glass bubble showing the current speed; expands on hover (or tap) to show every option. */
+function SpeedPicker({ speed, onSpeed }: { speed: number; onSpeed: (s: number) => void }) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: PointerEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
+    }
+    window.addEventListener('pointerdown', onDown)
+    return () => window.removeEventListener('pointerdown', onDown)
+  }, [open])
+
+  return (
+    <div
+      ref={rootRef}
+      className={`glass speed-picker${open ? ' is-open' : ''}`}
+      role="radiogroup"
+      aria-label="Playback speed"
+      onPointerEnter={(e) => e.pointerType === 'mouse' && setOpen(true)}
+      onPointerLeave={(e) => e.pointerType === 'mouse' && setOpen(false)}
+    >
+      {SPEEDS.map((s) => (
+        <button
+          key={s}
+          role="radio"
+          aria-checked={s === speed}
+          className={`speed-opt${s === speed ? ' is-on' : ''}`}
+          onFocus={() => setOpen(true)}
+          onClick={() => {
+            // Touch: the first tap opens the picker, the next one chooses.
+            if (!open) return setOpen(true)
+            onSpeed(s)
+          }}
+        >
+          {s}×
+        </button>
+      ))}
+    </div>
+  )
+}
+
+export function Timeline({ range, onChange, playing, onTogglePlay, speed, onSpeed, status, loading, marks, activeMark, onLoadArea, areaLoading }: Props) {
   const trackRef = useRef<HTMLDivElement>(null)
   const drag = useRef<Drag | null>(null)
 
@@ -113,7 +159,7 @@ export function Timeline({ range, onChange, playing, onTogglePlay, speed, onSpee
     <div className="glass timeline">
       <div className="timeline-top">
         <button
-          className={`glass-button play-button${playing ? ' is-playing' : ''}`}
+          className={`glass tl-btn play-button${playing ? ' is-playing' : ''}`}
           onClick={onTogglePlay}
           aria-label={playing ? 'Pause' : 'Play through time'}
         >
@@ -132,12 +178,23 @@ export function Timeline({ range, onChange, playing, onTogglePlay, speed, onSpee
 
         <div className="timeline-status">
           {loading && <span className="spinner" aria-hidden />}
-          <span>{status}</span>
+          <span className="status-text">{status}</span>
         </div>
+        {onLoadArea && (
+          <button
+            className={`glass tl-btn tl-expand${areaLoading ? ' is-busy' : ''}`}
+            onClick={onLoadArea}
+            disabled={areaLoading}
+            aria-label="Load more events in the area you're viewing"
+          >
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={areaLoading ? 'spin' : ''} aria-hidden>
+              <path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v5h-5" />
+            </svg>
+            <span className="tl-label">{areaLoading ? 'Loading this area…' : 'Load more here'}</span>
+          </button>
+        )}
 
-        <button className="glass-chip speed-chip" onClick={() => onSpeed(SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length])} title="Playback speed">
-          {speed}×
-        </button>
+        <SpeedPicker speed={speed} onSpeed={onSpeed} />
       </div>
 
       <div className="track-wrap" onPointerMove={onPointerMove} onPointerUp={() => (drag.current = null)}>

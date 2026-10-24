@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   ArcGisMapServerImageryProvider,
   BillboardGraphics,
@@ -10,6 +10,7 @@ import {
   Entity,
   HeightReference,
   HorizontalOrigin,
+  Math as CMath,
   ImageryLayer,
   Ion,
   NearFarScalar,
@@ -27,6 +28,8 @@ import { CATEGORY_META } from '../lib/categories'
 import { getThumb } from '../lib/wikipedia'
 import { formatYear } from '../lib/years'
 import { loadPhoto, markerGeometry, markerImage, type MarkerImage, type MarkerSpec } from '../lib/markerArt'
+import type { ViewRect } from '../lib/area'
+import { INTRO, divideFrom, rememberedRect, riseIn } from '../lib/intro'
 
 const ION_TOKEN = import.meta.env.VITE_CESIUM_ION_TOKEN as string | undefined
 
@@ -38,7 +41,7 @@ const SPACING = 3
 /** Minimum time between collision passes while the camera moves */
 const DECLUTTER_MS = 100
 /** Floating UI that markers must not peek out from under */
-const UI_SELECTOR = '.brand, .filter-bubble, .home-button, .search-bar, .search-results, .place-chip, .panel, .timeline'
+const UI_SELECTOR = '.brand-menu, .filter-bubble, .home-button, .search-bar, .search-results, .place-chip, .panel, .timeline'
 const UI_OWNER = '__ui'
 
 type Placement = { mode: 'full' | 'dot' | 'hidden'; hidden: number }
@@ -95,6 +98,8 @@ interface Props {
   thumbVersion: number
   /** Camera height in meters, reported when the camera stops moving */
   onCameraHeight?: (h: number) => void
+  /** Visible area in degrees, reported when the camera stops moving */
+  onViewChange?: (rect: ViewRect) => void
   /** Event to emphasize (hovered in the side panel) */
   highlightId?: string | null
   /** Fly to a place; a new `nonce` triggers the flight */
@@ -123,7 +128,7 @@ function homeDestination(canvas: HTMLCanvasElement): Cartesian3 {
   return Cartesian3.fromDegrees(15, 30, height)
 }
 
-export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion, onCameraHeight, focus, highlightId }: Props) {
+export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion, onCameraHeight, focus, highlightId, onViewChange }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
   const sourceRef = useRef<CustomDataSource | null>(null)
@@ -143,6 +148,8 @@ export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion, on
   onSelectRef.current = onSelect
   const onCameraHeightRef = useRef(onCameraHeight)
   onCameraHeightRef.current = onCameraHeight
+  const onViewChangeRef = useRef(onViewChange)
+  onViewChangeRef.current = onViewChange
   const [hover, setHover] = useState<{ x: number; y: number; event: HistEvent } | null>(null)
   /** id -> description of the marker currently shown, to skip no-op updates */
   const applied = useRef(new Map<string, string>())
@@ -244,6 +251,13 @@ export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion, on
     }
   }
 
+  // ---- intro: the globe button divides off the search bar, then the globe rises in ----
+  const homeRef = useRef<HTMLButtonElement>(null)
+  useLayoutEffect(() => {
+    divideFrom(homeRef.current, rememberedRect('search'), INTRO.home)
+    riseIn(containerRef.current, INTRO.globe)
+  }, [])
+
   // ---- create the viewer once ----
   useEffect(() => {
     if (ION_TOKEN) Ion.defaultAccessToken = ION_TOKEN
@@ -277,6 +291,12 @@ export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion, on
 
     const onCameraStop = () => {
       onCameraHeightRef.current?.(viewer.camera.positionCartographic.height)
+      const r = viewer.camera.computeViewRectangle()
+      onViewChangeRef.current?.(
+        r
+          ? { west: CMath.toDegrees(r.west), south: CMath.toDegrees(r.south), east: CMath.toDegrees(r.east), north: CMath.toDegrees(r.north) }
+          : { west: -180, south: -90, east: 180, north: 90 },
+      )
       dirty.current = true
     }
     viewer.camera.moveEnd.addEventListener(onCameraStop)
@@ -427,7 +447,7 @@ export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion, on
   return (
     <div className="globe">
       <div ref={containerRef} className="globe-canvas" />
-      <button className="glass glass-button home-button" onClick={flyHome} title="Reset view" aria-label="Reset view">
+      <button ref={homeRef} className="glass glass-button home-button" onClick={flyHome} title="Reset view" aria-label="Reset view">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8">
           <circle cx="12" cy="12" r="9" />
           <path d="M3 12h18M12 3c2.8 3 2.8 15 0 18M12 3c-2.8 3-2.8 15 0 18" />

@@ -30,6 +30,10 @@ World Imagery is used.
   events (photo, date, the opening of the article), a category mix bar, **Hidden gems**
   (lesser-known events with photos, reshuffleable), and the full list sorted by notability
   or as a timeline. Hovering any of them highlights the event on the globe.
+- **Load more here** (the ↻ bubble on the timeline): loads every event in the visible map area
+  for the current time range, not just the period's globally notable ones.
+- Hover the logo: it stretches into a pill with the name, then an About panel drops down: how to use it, your (guest) account and cache, and
+  technical details (versions, data sources, what's loaded).
 - Category filters tucked into a glass bubble beside the globe button, a Liquid Glass UI,
   and a phone layout with a bottom sheet.
 
@@ -56,6 +60,8 @@ Loading is tiered, so events show within a fraction of a second:
   pills), drawn at 2–3× and handed to Cesium as data URLs so textures are reused.
 - `src/lib/search.ts`: global search. Wikipedia full-text search, then one Wikidata
   lookup for each hit's date and place. Pages with coordinates but no event date are places.
+- `src/lib/area.ts`: "Load more here". The period query plus a latitude/longitude filter for
+  the visible area (~3 s per slice).
 - `src/lib/places.ts`: events at a place, in three tiers: nearby seed events (instant),
   Wikidata's search index for events with their own coordinates nearby (~0.3 s), then a
   SPARQL query for events located in the place or up to two levels inside it, or anywhere in

@@ -1,56 +1,82 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { AboutContent, type AboutInfo } from './AboutDrawer'
+import { Logo } from './Logo'
 
-/** Globe inside a counter-clockwise "rewind" arc: places across time. */
-export function Logo({ size = 38 }: { size?: number }) {
-  return (
-    <svg className="logo" viewBox="0 0 40 40" width={size} height={size} aria-hidden>
-      <defs>
-        <linearGradient id="logo-rim" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#fff" stopOpacity="0.7" />
-          <stop offset="0.55" stopColor="#fff" stopOpacity="0.1" />
-          <stop offset="1" stopColor="#fff" stopOpacity="0.35" />
-        </linearGradient>
-      </defs>
-      {/* glass disc */}
-      <circle cx="20" cy="20" r="19.25" fill="rgba(15,23,42,0.45)" stroke="url(#logo-rim)" strokeWidth="1.5" />
-      {/* time arc with arrowhead (history runs backwards) */}
-      <path d="M31.5 13.5A13.5 13.5 0 1 0 33.5 20" fill="none" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" />
-      <path d="M30.9 22.4l2.6-2.7 2.6 2.7" fill="none" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-      {/* globe */}
-      <g fill="none" stroke="#fff" strokeWidth="1.4" strokeLinecap="round">
-        <circle cx="20" cy="20" r="8.5" />
-        <ellipse cx="20" cy="20" rx="3.6" ry="8.5" />
-        <path d="M11.8 17.2h16.4M11.8 22.8h16.4" strokeOpacity="0.75" />
-      </g>
-    </svg>
-  )
-}
-
-/** Logo pill that tucks its wordmark away after a few seconds; hover or focus reveals it. */
-export function Brand() {
-  const [collapsed, setCollapsed] = useState(false)
-  const [hovered, setHovered] = useState(false)
+/**
+ * The logo, which is also the About menu. One glass shape that grows in two
+ * steps: on hover it first stretches sideways into a pill with the name (like
+ * the filter bubble), then the About content drops down from it. Leaving
+ * reverses the motion. A click pins it open; Esc or ✕ closes it.
+ * On first load the name shows for a few seconds as an introduction.
+ */
+export function BrandMenu({ info }: { info: AboutInfo }) {
+  const [intro, setIntro] = useState(true)
+  const [open, setOpen] = useState(false)
+  const [pinned, setPinned] = useState(false)
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   useEffect(() => {
-    const t = setTimeout(() => setCollapsed(true), 3500)
+    const t = setTimeout(() => setIntro(false), 3500)
     return () => clearTimeout(t)
   }, [])
 
-  const expanded = !collapsed || hovered
+  const close = () => {
+    setOpen(false)
+    setPinned(false)
+  }
+
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && close()
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open])
+
+  const state = open ? 'is-open' : intro ? 'is-intro' : ''
+
   return (
     <div
-      className={`glass brand${expanded ? '' : ' is-collapsed'}`}
-      onPointerEnter={() => setHovered(true)}
-      onPointerLeave={() => setHovered(false)}
-      onFocus={() => setHovered(true)}
-      onBlur={() => setHovered(false)}
-      tabIndex={0}
-      aria-label="Chronoglobe: history from Wikipedia, mapped"
+      className={`glass brand-menu ${state}`}
+      onPointerEnter={(e) => {
+        if (e.pointerType !== 'mouse') return
+        clearTimeout(closeTimer.current)
+        setOpen(true)
+      }}
+      onPointerLeave={(e) => {
+        if (e.pointerType !== 'mouse' || pinned) return
+        closeTimer.current = setTimeout(() => setOpen(false), 400)
+      }}
     >
-      <Logo />
-      <div className="brand-text" aria-hidden={!expanded}>
-        <h1>Chronoglobe</h1>
-        <p>History from Wikipedia, mapped</p>
+      <div className="brand-row">
+        <button
+          className="brand"
+          onClick={() => {
+            if (open && pinned) close()
+            else {
+              setOpen(true)
+              setPinned(true)
+            }
+          }}
+          aria-expanded={open}
+          aria-controls="about-menu"
+          aria-label="About Chronoglobe"
+        >
+          <Logo />
+          <span className="brand-text" aria-hidden>
+            <span className="brand-name">Chronoglobe</span>
+            <span className="brand-tagline">History from Wikipedia, mapped</span>
+          </span>
+        </button>
+        <button className="glass-button brand-close" onClick={close} aria-label="Close" tabIndex={open ? 0 : -1}>
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
+      </div>
+      <div className="brand-drop" id="about-menu" aria-hidden={!open} inert={!open || undefined}>
+        <div className="brand-drop-inner">
+          <AboutContent open={open} info={info} />
+        </div>
       </div>
     </div>
   )

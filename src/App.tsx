@@ -1,8 +1,9 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { Category, HistEvent, YearRange } from './types'
 import { CATEGORIES } from './lib/categories'
 import { MAX_YEAR, MIN_YEAR, formatYear } from './lib/years'
 import { setThumb } from './lib/wikipedia'
+import { INTRO, cellAppear, divideFrom, flowFrom, rememberRect, startIntro } from './lib/intro'
 import type { SearchHit } from './lib/search'
 import type { Place } from './lib/places'
 import { usePlaceEvents } from './hooks/usePlaceEvents'
@@ -12,7 +13,9 @@ import { useThumbs } from './hooks/useThumbs'
 import { Timeline } from './components/Timeline'
 import { EventPanel } from './components/EventPanel'
 import { FilterBubble } from './components/FilterBubble'
-import { Brand } from './components/Brand'
+import { BrandMenu } from './components/Brand'
+import { useAreaEvents } from './hooks/useAreaEvents'
+import type { ViewRect } from './lib/area'
 import { SearchBar } from './components/SearchBar'
 
 // Cesium is ~4 MB; load it in its own chunk so the interface (and the seed
@@ -59,6 +62,30 @@ export default function App() {
   // follows its height as results open and close.
   const appRef = useRef<HTMLDivElement>(null)
   const stackRef = useRef<HTMLDivElement>(null)
+
+  // Page-load intro, like cells dividing: the logo appears, the search bar
+  // divides off it, the side panel and filter bubble divide off the search bar,
+  // and once the panel has formed the timeline divides off the panel (see
+  // lib/intro.ts). Runs before the first paint so nothing flashes.
+  useLayoutEffect(() => {
+    if (!startIntro()) return
+    const q = (sel: string) => appRef.current?.querySelector(sel) ?? null
+    const logo = q('.brand-menu')
+    const search = q('.search-bar')
+    // Measure every source before any animation moves things.
+    const logoRect = logo?.getBoundingClientRect()
+    const searchRect = search?.getBoundingClientRect()
+    const panel = q('.panel')
+    const panelRect = panel?.getBoundingClientRect()
+    rememberRect('logo', logoRect)
+    rememberRect('search', searchRect)
+    cellAppear(logo, INTRO.logo)
+    divideFrom(search, logoRect ?? null, INTRO.search)
+    // Long bars pour out like a dropdown; small controls bud off as round cells.
+    flowFrom(panel, searchRect ?? null, INTRO.panel)
+    divideFrom(q('.filter-bubble'), searchRect ?? null, INTRO.filter)
+    flowFrom(q('.timeline'), panelRect ?? null, INTRO.timeline)
+  }, [])
   useEffect(() => {
     const stack = stackRef.current
     if (!stack) return
@@ -76,10 +103,19 @@ export default function App() {
   const detail = !place && (cameraHeight < ZOOMED_IN_HEIGHT || span <= NARROW_SPAN)
   const periodData = useEvents(range, detail, playing && !place ? span * 3 + 10 : 0)
   const { seeding, pending, error } = periodData
-  const all = useMemo(
-    () => (place ? placeAll.filter((e) => e.year >= range.from && e.year <= range.to) : periodData.events),
-    [place, placeAll, periodData.events, range.from, range.to],
-  )
+
+  // "Load more here": events force-loaded for the area in view.
+  const area = useAreaEvents()
+  const viewRect = useRef<ViewRect>({ west: -180, south: -90, east: 180, north: 90 })
+
+  const all = useMemo(() => {
+    const inRange = (e: HistEvent) => e.year >= range.from && e.year <= range.to
+    if (place) return placeAll.filter(inRange)
+    if (!area.events.size) return periodData.events
+    const byId = new Map(periodData.events.map((e) => [e.id, e]))
+    for (const e of area.events.values()) if (inRange(e)) byId.set(e.id, e)
+    return [...byId.values()]
+  }, [place, placeAll, periodData.events, area.events, range.from, range.to])
 
   // An event picked from search stays on the map even if it isn't among the
   // notable events loaded for this period (or its category is filtered out).
@@ -223,6 +259,16 @@ export default function App() {
       return n
     })
 
+  const loadHere = () => area.load(viewRect.current, range, new Set(all.map((e) => e.id)))
+  const areaNote =
+    area.loading || area.lastAdded === null
+      ? ''
+      : area.lastAdded < 0
+        ? " · couldn't load this area"
+        : area.lastAdded === 0
+          ? ' · nothing new here'
+          : ` · +${area.lastAdded} here`
+
   const status = place
     ? placeLoading
       ? `${events.length} events · finding more in ${place.title}…`
@@ -233,9 +279,11 @@ export default function App() {
       ? `${events.length} events · Wikidata busy`
       : pending
         ? `${events.length} events · loading more…`
-        : detail
-          ? `${events.length} events`
-          : `${events.length} notable events · zoom in for more`
+        : area.loading
+          ? `${events.length} events · loading this area…`
+          : detail
+            ? `${events.length} events${areaNote}`
+            : `${events.length} notable events${areaNote || ' · zoom in for more'}`
 
   return (
     <div ref={appRef} className={`app${place ? ' has-place' : ''}`}>
@@ -249,11 +297,12 @@ export default function App() {
           onCameraHeight={setCameraHeight}
           focus={focus}
           highlightId={hoverId}
+          onViewChange={(r) => (viewRect.current = r)}
         />
       </Suspense>
 
       <header className="topbar">
-        <Brand />
+        <BrandMenu info={{ eventsShown: events.length, eventsKnown: all.length }} />
       </header>
 
       <FilterBubble
@@ -303,7 +352,9 @@ export default function App() {
         speed={speed}
         onSpeed={setSpeed}
         status={status}
-        loading={place ? placeLoading : seeding || pending > 0}
+        loading={place ? placeLoading : seeding || pending > 0 || area.loading}
+        onLoadArea={place ? undefined : loadHere}
+        areaLoading={area.loading}
       />
     </div>
   )

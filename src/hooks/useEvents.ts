@@ -1,7 +1,15 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import type { HistEvent, YearRange } from '../types'
 import { fetchEvents, WikidataError } from '../lib/wikidata'
+import { loadSeed } from '../lib/seed'
 
+// Loading is tiered so something useful is on screen immediately:
+//  1. Seed: a static file of the most notable events of every era, shipped
+//     with the site (scripts/build-seed.ts). Loaded once, shown instantly.
+//  2. Detail: live Wikidata queries for the visible period, only when the
+//     user zooms in (map or timeline). They stream in behind the seed.
+//  3. Wikidata responses are kept in Cache Storage (see wikidata.ts).
+//
 // The timeline range is split into aligned buckets (e.g. 1930–1939, 1940–1949)
 // so that results can be cached and reused as the window slides. The bucket
 // size grows with the window span to keep the number of queries small; each
@@ -32,6 +40,16 @@ function bucketsFor(from: number, to: number, size: number): Bucket[] {
 }
 
 // ---- module-level store: survives re-renders and StrictMode remounts ----
+
+let seed: HistEvent[] = []
+let seedLoaded = false
+
+loadSeed().then((events) => {
+  seed = events
+  seedLoaded = true
+  emit()
+})
+
 
 const cache = new Map<string, HistEvent[]>()
 const failed = new Map<string, number>() // key -> time of failure
@@ -97,16 +115,19 @@ function subscribe(l: () => void) {
 
 export interface EventsState {
   events: HistEvent[]
-  /** Number of buckets for the visible range still loading */
+  /** True until the seed file has arrived */
+  seeding: boolean
+  /** Number of detail buckets for the visible range still loading */
   pending: number
   error: string | null
 }
 
 /**
- * Events whose year lies in `range`. `lookahead` (years past `range.to`) is
- * prefetched at lower priority, used while the timeline is playing.
+ * Events whose year lies in `range`: seed events always, plus live detail
+ * when `detail` is on. `lookahead` (years past `range.to`) is prefetched at
+ * lower priority, used while the timeline is playing.
  */
-export function useEvents(range: YearRange, lookahead = 0): EventsState {
+export function useEvents(range: YearRange, detail: boolean, lookahead = 0): EventsState {
   const [debounced, setDebounced] = useState(range)
   useEffect(() => {
     const t = setTimeout(() => setDebounced(range), DEBOUNCE_MS)
@@ -122,24 +143,26 @@ export function useEvents(range: YearRange, lookahead = 0): EventsState {
   )
 
   useEffect(() => {
+    if (!detail) return request([])
     const ahead = lookahead > 0 ? bucketsFor(debounced.to + 1, debounced.to + lookahead, size) : []
     request([...visible, ...ahead])
-  }, [visible, lookahead, size, debounced.to])
+  }, [visible, lookahead, size, debounced.to, detail])
 
   // Combine every cached bucket that overlaps the live (non-debounced) range,
   // whatever its size, so zooming the window shows existing data immediately.
   const events = useMemo(() => {
     const byId = new Map<string, HistEvent>()
+    for (const e of seed) if (e.year >= range.from && e.year <= range.to) byId.set(e.id, e)
     for (const [key, list] of cache) {
       const [s, start] = key.split(':').map(Number)
       if (start > range.to || start + s - 1 < range.from) continue
       for (const e of list) {
-        if (e.year >= range.from && e.year <= range.to && !byId.has(e.id)) byId.set(e.id, e)
+        if (e.year >= range.from && e.year <= range.to) byId.set(e.id, e)
       }
     }
     return [...byId.values()]
   }, [range.from, range.to, version])
 
-  const pending = visible.filter((b) => !cache.has(b.key) && !failed.has(b.key)).length
-  return { events, pending, error: lastError }
+  const pending = detail ? visible.filter((b) => !cache.has(b.key) && !failed.has(b.key)).length : 0
+  return { events, seeding: !seedLoaded, pending, error: detail ? lastError : null }
 }

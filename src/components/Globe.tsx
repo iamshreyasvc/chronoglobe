@@ -4,17 +4,16 @@ import {
   BillboardGraphics,
   Cartesian2,
   Cartesian3,
-  Color,
+  Ellipsoid,
+  EllipsoidalOccluder,
   CustomDataSource,
   Entity,
   HeightReference,
   HorizontalOrigin,
   ImageryLayer,
   Ion,
-  LabelGraphics,
-  LabelStyle,
   NearFarScalar,
-  PointGraphics,
+  SceneTransforms,
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
   Terrain,
@@ -27,14 +26,64 @@ import type { HistEvent } from '../types'
 import { CATEGORY_META } from '../lib/categories'
 import { getThumb } from '../lib/wikipedia'
 import { formatYear } from '../lib/years'
+import { loadPhoto, markerGeometry, markerImage, type MarkerImage, type MarkerSpec } from '../lib/markerArt'
 
 const ION_TOKEN = import.meta.env.VITE_CESIUM_ION_TOKEN as string | undefined
 
 /** How many of the most notable visible events are drawn as photo bubbles. */
 const MAX_BUBBLES = 45
-const BUBBLE_PX = 54
-/** Extra texture resolution for canvas art (drawn in 2x units, stored at 3x) so it stays sharp on Retina and when scaled up near the camera. */
-const TEX = 1.5
+const MARKER_SCALE = new NearFarScalar(1e5, 1.2, 2e7, 0.8)
+/** Extra space kept between markers/labels, CSS px */
+const SPACING = 3
+/** Minimum time between collision passes while the camera moves */
+const DECLUTTER_MS = 100
+/** Floating UI that markers must not peek out from under */
+const UI_SELECTOR = '.brand, .filter-bubble, .home-button, .search-bar, .search-results, .place-chip, .panel, .timeline'
+const UI_OWNER = '__ui'
+
+type Placement = { mode: 'full' | 'dot' | 'hidden'; hidden: number }
+
+interface Rect {
+  x0: number
+  y0: number
+  x1: number
+  y1: number
+  owner: string
+}
+
+/** Markers scale with distance; same interpolation Cesium applies for MARKER_SCALE. */
+function scaleAt(distance: number): number {
+  const { near, nearValue, far, farValue } = MARKER_SCALE
+  const t = Math.min(1, Math.max(0, (distance - near) / (far - near)))
+  return nearValue + (farValue - nearValue) * t
+}
+
+/** Uniform grid of placed rectangles for fast overlap checks. */
+class CollisionGrid {
+  private cells = new Map<number, Rect[]>()
+  private static SIZE = 96
+  private keys(r: Rect): number[] {
+    const out: number[] = []
+    const s = CollisionGrid.SIZE
+    for (let gx = Math.floor(r.x0 / s); gx <= Math.floor(r.x1 / s); gx++)
+      for (let gy = Math.floor(r.y0 / s); gy <= Math.floor(r.y1 / s); gy++) out.push(gx * 100003 + gy)
+    return out
+  }
+  /** Owner of the first placed rect that overlaps r, or null. */
+  hit(r: Rect): string | null {
+    for (const k of this.keys(r))
+      for (const o of this.cells.get(k) ?? [])
+        if (r.x0 < o.x1 && r.x1 > o.x0 && r.y0 < o.y1 && r.y1 > o.y0) return o.owner
+    return null
+  }
+  add(r: Rect) {
+    for (const k of this.keys(r)) {
+      let list = this.cells.get(k)
+      if (!list) this.cells.set(k, (list = []))
+      list.push(r)
+    }
+  }
+}
 
 interface Props {
   events: HistEvent[]
@@ -44,239 +93,25 @@ interface Props {
   flyNonce: number
   /** Changes whenever new thumbnails are available */
   thumbVersion: number
+  /** Camera height in meters, reported when the camera stops moving */
+  onCameraHeight?: (h: number) => void
+  /** Event to emphasize (hovered in the side panel) */
+  highlightId?: string | null
+  /** Fly to a place; a new `nonce` triggers the flight */
+  focus?: { lat: number; lon: number; height: number; nonce: number } | null
 }
 
-// ---------- canvas art: glass cluster + photo bubbles ----------
-// Real glass reads through edges, not white fill: a thin rim that is bright
-// where light hits (top-left) and fades away from it, darker refraction at
-// the edge, and one small, crisp specular highlight.
-
-function glassFinish(g: CanvasRenderingContext2D, cx: number, cy: number, r: number) {
-  // Edge refraction: the content darkens slightly toward the rim.
-  const edge = g.createRadialGradient(cx, cy, r * 0.62, cx, cy, r)
-  edge.addColorStop(0, 'rgba(0,0,0,0)')
-  edge.addColorStop(1, 'rgba(0,0,0,0.32)')
-  g.fillStyle = edge
-  g.beginPath()
-  g.arc(cx, cy, r, 0, Math.PI * 2)
-  g.fill()
-
-  // Small specular crescent near the top-left edge.
-  g.save()
-  g.beginPath()
-  g.arc(cx, cy, r, 0, Math.PI * 2)
-  g.clip()
-  const spec = g.createLinearGradient(cx - r, cy - r, cx, cy)
-  spec.addColorStop(0, 'rgba(255,255,255,0.38)')
-  spec.addColorStop(1, 'rgba(255,255,255,0)')
-  g.strokeStyle = spec
-  g.lineWidth = r * 0.09
-  g.lineCap = 'round'
-  g.beginPath()
-  g.arc(cx, cy, r * 0.8, Math.PI * 1.08, Math.PI * 1.42)
-  g.stroke()
-  g.restore()
-
-  // Rim: light catches the top-left edge and fades toward the bottom-right.
-  const rim = g.createLinearGradient(cx - r, cy - r, cx + r, cy + r)
-  rim.addColorStop(0, 'rgba(255,255,255,0.7)')
-  rim.addColorStop(0.5, 'rgba(255,255,255,0.12)')
-  rim.addColorStop(1, 'rgba(255,255,255,0.35)')
-  g.strokeStyle = rim
-  g.lineWidth = 1.5
-  g.beginPath()
-  g.arc(cx, cy, r - 0.75, 0, Math.PI * 2)
-  g.stroke()
-}
-
-function dropShadow(g: CanvasRenderingContext2D, cx: number, cy: number, r: number) {
-  g.save()
-  g.shadowColor = 'rgba(0,0,0,0.45)'
-  g.shadowBlur = 10
-  g.shadowOffsetY = 3
-  g.fillStyle = 'rgba(0,0,0,0.6)'
-  g.beginPath()
-  g.arc(cx, cy, r - 1, 0, Math.PI * 2)
-  g.fill()
-  g.restore()
-}
-
-const clusterIcons = new Map<string, HTMLCanvasElement>()
-
-function clusterIcon(count: number): HTMLCanvasElement {
-  const label = count >= 1000 ? `${Math.floor(count / 1000)}k` : String(count)
-  const cached = clusterIcons.get(label)
-  if (cached) return cached
-  const size = count < 10 ? 38 : count < 100 ? 46 : 54
-  const pad = 8
-  const r = size - pad // drawn at 2x
-  const c = document.createElement('canvas')
-  c.width = c.height = size * 2 * TEX
-  const g = c.getContext('2d')!
-  g.scale(TEX, TEX)
-  const cx = size
-  dropShadow(g, cx, cx, r)
-  // Keep the shadow only outside the disc so the body stays translucent.
-  g.globalCompositeOperation = 'destination-out'
-  g.beginPath()
-  g.arc(cx, cx, r - 1, 0, Math.PI * 2)
-  g.fill()
-  g.globalCompositeOperation = 'source-over'
-  g.fillStyle = 'rgba(30,41,59,0.55)'
-  g.beginPath()
-  g.arc(cx, cx, r, 0, Math.PI * 2)
-  g.fill()
-  glassFinish(g, cx, cx, r)
-  g.fillStyle = '#fff'
-  g.font = `600 ${size < 44 ? 24 : 27}px -apple-system, system-ui, sans-serif`
-  g.textAlign = 'center'
-  g.textBaseline = 'middle'
-  g.fillText(label, cx, cx + 1)
-  clusterIcons.set(label, c)
-  return c
-}
-
-const photoClusterIcons = new Map<string, HTMLCanvasElement>()
-
-/** A cluster drawn as its most notable member's photo bubble plus a count badge. */
-function photoClusterIcon(id: string, photo: HTMLCanvasElement, count: number): HTMLCanvasElement {
-  const label = count >= 1000 ? `${Math.floor(count / 1000)}k` : String(count)
-  const key = `${id}:${label}`
-  const cached = photoClusterIcons.get(key)
-  if (cached) return cached
-  const r = BUBBLE_PX + 4 // drawn at 2x, a little larger than single bubbles
-  const pad = 14
-  const c = document.createElement('canvas')
-  c.width = c.height = (r * 2 + pad * 2) * TEX
-  const g = c.getContext('2d')!
-  g.scale(TEX, TEX)
-  // A second glass disc peeking out behind, so it reads as a group.
-  const bx0 = pad + r + 9
-  const by0 = pad + r - 7
-  g.fillStyle = 'rgba(30,41,59,0.45)'
-  g.beginPath()
-  g.arc(bx0, by0, r - 8, 0, Math.PI * 2)
-  g.fill()
-  glassFinish(g, bx0, by0, r - 8)
-  g.drawImage(photo, pad, pad, r * 2, r * 2)
-  // Count badge: small dark glass pill, top-right.
-  const br = 19
-  const bx = c.width / TEX - br - 3
-  const by = br + 3
-  dropShadow(g, bx, by, br)
-  g.fillStyle = 'rgba(15,23,42,0.88)'
-  g.beginPath()
-  g.arc(bx, by, br, 0, Math.PI * 2)
-  g.fill()
-  glassFinish(g, bx, by, br)
-  g.fillStyle = '#fff'
-  g.font = `650 ${label.length > 2 ? 15 : 19}px -apple-system, system-ui, sans-serif`
-  g.textAlign = 'center'
-  g.textBaseline = 'middle'
-  g.fillText(label, bx, by + 1)
-  photoClusterIcons.set(key, c)
-  return c
-}
-
-const bubbles = new Map<string, Promise<HTMLCanvasElement>>()
-
-function photoBubble(url: string, ring: string): Promise<HTMLCanvasElement> {
-  const key = `${url}|${ring}`
-  let p = bubbles.get(key)
-  if (!p) {
-    p = new Promise((resolve, reject) => {
-      const img = new Image()
-      img.crossOrigin = 'anonymous'
-      img.onload = () => {
-        const size = BUBBLE_PX // canvas is 2x the on-screen size
-        const r = size - 8 // leave room for the drop shadow
-        const c = document.createElement('canvas')
-        c.width = c.height = size * 2 * TEX
-        const g = c.getContext('2d')!
-        g.scale(TEX, TEX)
-        g.imageSmoothingQuality = 'high'
-        const cx = size
-        dropShadow(g, cx, cx, r)
-        g.save()
-        g.beginPath()
-        g.arc(cx, cx, r, 0, Math.PI * 2)
-        g.clip()
-        const s = Math.max((r * 2) / img.width, (r * 2) / img.height) // cover
-        g.drawImage(img, cx - (img.width * s) / 2, cx - (img.height * s) / 2, img.width * s, img.height * s)
-        g.restore()
-        // Thin category tint just inside the rim.
-        g.globalAlpha = 0.85
-        g.strokeStyle = ring
-        g.lineWidth = 3
-        g.beginPath()
-        g.arc(cx, cx, r - 2.5, 0, Math.PI * 2)
-        g.stroke()
-        g.globalAlpha = 1
-        glassFinish(g, cx, cx, r)
-        resolve(c)
-      }
-      img.onerror = reject
-      img.src = url
-    })
-    bubbles.set(key, p)
-  }
-  return p
-}
-
-// ---------- entity graphics ----------
-
-function pointSize(e: HistEvent): number {
-  return 7 + Math.min(9, Math.sqrt(e.sitelinks) * 0.9)
-}
-
-function pointGraphics(e: HistEvent, selected: boolean): PointGraphics {
-  const color = Color.fromCssColorString(CATEGORY_META[e.category].color)
-  return new PointGraphics({
-    pixelSize: pointSize(e) + (selected ? 7 : 0),
-    color: color.withAlpha(0.9),
-    outlineColor: selected ? Color.WHITE : Color.WHITE.withAlpha(0.7),
-    outlineWidth: selected ? 3 : 1.5,
-    heightReference: HeightReference.CLAMP_TO_GROUND,
-    scaleByDistance: new NearFarScalar(1e5, 1.3, 2e7, 0.8),
-  })
-}
-
-function bubbleGraphics(image: HTMLCanvasElement, selected: boolean): BillboardGraphics {
+function billboard(img: MarkerImage): BillboardGraphics {
   return new BillboardGraphics({
-    image,
-    width: BUBBLE_PX * (selected ? 1.35 : 1),
-    height: BUBBLE_PX * (selected ? 1.35 : 1),
-    heightReference: HeightReference.CLAMP_TO_GROUND,
-    verticalOrigin: VerticalOrigin.CENTER,
-    scaleByDistance: new NearFarScalar(1e5, 1.25, 2e7, 0.7),
-  })
-}
-
-function shortTitle(t: string): string {
-  t = t.replace(/\s*\([^)]*\)$/, '') // "Battle of Himera (480 BC)" -> "Battle of Himera"
-  return t.length > 30 ? `${t.slice(0, 28).trimEnd()}…` : t
-}
-
-const LABEL_BG = Color.fromCssColorString('rgba(15,23,42,0.62)')
-const LABEL_BG_SELECTED = Color.fromCssColorString('rgba(15,23,42,0.9)')
-
-function labelGraphics(e: HistEvent, hasBubble: boolean, selected: boolean): LabelGraphics {
-  return new LabelGraphics({
-    text: selected ? e.title : shortTitle(e.title),
-    // Glyphs are rasterized at the font size; draw at 2x and scale by 0.5 so text stays crisp.
-    font: selected ? '600 28px -apple-system, system-ui, sans-serif' : '500 24px -apple-system, system-ui, sans-serif',
-    scale: 0.5,
-    fillColor: Color.WHITE,
-    showBackground: true,
-    backgroundColor: selected ? LABEL_BG_SELECTED : LABEL_BG,
-    backgroundPadding: new Cartesian2(14, 8),
-    style: LabelStyle.FILL,
+    image: img.url,
+    width: img.width,
+    height: img.height,
     horizontalOrigin: HorizontalOrigin.LEFT,
     verticalOrigin: VerticalOrigin.CENTER,
-    // Sit just right of the marker; bubbles scale with distance, so the offset does too.
-    pixelOffset: new Cartesian2(hasBubble ? BUBBLE_PX / 2 - 2 + (selected ? 10 : 0) : 10, 0),
-    pixelOffsetScaleByDistance: hasBubble ? new NearFarScalar(1e5, 1.25, 2e7, 0.7) : undefined,
-    scaleByDistance: new NearFarScalar(1e5, 1.05, 2e7, 0.85),
+    // Put the marker's center (not the image's left edge) on the location.
+    pixelOffset: new Cartesian2(-img.anchorX, 0),
+    pixelOffsetScaleByDistance: MARKER_SCALE,
+    scaleByDistance: MARKER_SCALE,
     heightReference: HeightReference.CLAMP_TO_GROUND,
   })
 }
@@ -288,34 +123,125 @@ function homeDestination(canvas: HTMLCanvasElement): Cartesian3 {
   return Cartesian3.fromDegrees(15, 30, height)
 }
 
-// ---------- component ----------
-
-export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion }: Props) {
+export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion, onCameraHeight, focus, highlightId }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
   const sourceRef = useRef<CustomDataSource | null>(null)
   const eventsById = useRef(new Map<string, HistEvent>())
-  /** id -> rendered bubble canvas, for entities currently shown as bubbles */
-  const bubbleImages = useRef(new Map<string, HTMLCanvasElement>())
+  /** id -> loaded photo, for events currently shown as photo bubbles */
+  const photos = useRef(new Map<string, { key: string; canvas: HTMLCanvasElement }>())
+  const positions = useRef(new Map<string, Cartesian3>())
+  /** Result of the last collision pass */
+  const placement = useRef(new Map<string, Placement>())
+  /** Set when events, photos or selection change, so the next frame re-places markers */
+  const dirty = useRef(true)
   const selectedRef = useRef(selectedId)
   selectedRef.current = selectedId
+  const highlightRef = useRef(highlightId)
+  highlightRef.current = highlightId
   const onSelectRef = useRef(onSelect)
   onSelectRef.current = onSelect
+  const onCameraHeightRef = useRef(onCameraHeight)
+  onCameraHeightRef.current = onCameraHeight
   const [hover, setHover] = useState<{ x: number; y: number; event: HistEvent } | null>(null)
-  const prevSelected = useRef<string | null>(null)
+  /** id -> description of the marker currently shown, to skip no-op updates */
+  const applied = useRef(new Map<string, string>())
 
-  /** Set marker (photo bubble or dot) and name label for an entity. */
+  const specFor = (e: HistEvent, label: boolean, hidden = 0): MarkerSpec => ({
+    title: e.title,
+    color: CATEGORY_META[e.category].color,
+    sitelinks: e.sitelinks,
+    photo: photos.current.get(e.id),
+    label,
+    // A hovered event is drawn like the selected one: larger, with its full name.
+    selected: e.id === selectedRef.current || e.id === highlightRef.current,
+    hidden,
+  })
+
+  /** Show an entity as placed: marker with name, marker only, or hidden. */
   const applyGraphics = (ent: Entity, e: HistEvent) => {
-    const sel = e.id === selectedRef.current
-    const img = bubbleImages.current.get(e.id)
-    if (img) {
-      ent.point = undefined
-      ent.billboard = bubbleGraphics(img, sel)
-    } else {
-      ent.billboard = undefined
-      ent.point = pointGraphics(e, sel)
+    const p = placement.current.get(e.id) ?? { mode: 'hidden', hidden: 0 }
+    const spec = specFor(e, p.mode === 'full', p.hidden)
+    const state = p.mode === 'hidden' ? 'hidden' : `${spec.photo?.key ?? ''}|${spec.label}|${spec.selected}|${p.hidden}`
+    if (applied.current.get(e.id) === state) return
+    applied.current.set(e.id, state)
+    ent.show = p.mode !== 'hidden'
+    if (ent.show) ent.billboard = billboard(markerImage(spec))
+  }
+
+  /**
+   * Label placement, as map apps do it: project every event to the screen and
+   * place them in priority order (selected, photo bubbles, then notability).
+   * Each gets its marker and name if both fit, else just the marker, else it
+   * is hidden and counted on the marker that covers it ("+N"). Nothing that
+   * is drawn overlaps.
+   */
+  const declutter = () => {
+    const viewer = viewerRef.current
+    const coll = sourceRef.current?.entities
+    if (!viewer || !coll) return
+    const scene = viewer.scene
+    const camPos = scene.camera.positionWC
+    const occluder = new EllipsoidalOccluder(Ellipsoid.WGS84, camPos)
+    const sel = selectedRef.current
+    const hi = highlightRef.current
+    const rank = (e: HistEvent) =>
+      (e.id === sel ? 2e9 : e.id === hi ? 1e9 : photos.current.has(e.id) ? 1e6 : 0) + e.sitelinks
+    const ordered = [...eventsById.current.values()].sort((a, b) => rank(b) - rank(a))
+
+    const grid = new CollisionGrid()
+    const next = new Map<string, Placement>()
+    // Reserve the space taken by floating UI.
+    const origin = viewer.canvas.getBoundingClientRect()
+    for (const el of document.querySelectorAll(UI_SELECTOR)) {
+      const r = el.getBoundingClientRect()
+      if (r.width && r.height)
+        grid.add({ x0: r.left - origin.left, y0: r.top - origin.top, x1: r.right - origin.left, y1: r.bottom - origin.top, owner: UI_OWNER })
     }
-    ent.label = labelGraphics(e, !!img, sel)
+    const win = new Cartesian2()
+    const rectOf = (e: HistEvent, label: boolean, s: number): Rect => {
+      const g = markerGeometry(specFor(e, label))
+      const left = win.x - g.anchorX * s
+      const top = win.y - (g.height / 2) * s
+      return {
+        x0: left + g.pad * s - SPACING,
+        y0: top + g.pad * s - SPACING,
+        x1: left + (g.width - g.pad) * s + SPACING,
+        y1: top + (g.height - g.pad) * s + SPACING,
+        owner: e.id,
+      }
+    }
+
+    for (const e of ordered) {
+      const pos = positions.current.get(e.id)!
+      if (!occluder.isPointVisible(pos) || !SceneTransforms.worldToWindowCoordinates(scene, pos, win)) {
+        next.set(e.id, { mode: 'hidden', hidden: 0 })
+        continue
+      }
+      const s = scaleAt(Cartesian3.distance(camPos, pos))
+      const full = rectOf(e, true, s)
+      const onScreen = full.x0 >= 0 && full.y0 >= 0 && full.x1 <= origin.width && full.y1 <= origin.height
+      if (e.id === sel || e.id === hi || (onScreen && !grid.hit(full))) { // selected/hovered always show
+        grid.add(full)
+        next.set(e.id, { mode: 'full', hidden: 0 })
+        continue
+      }
+      const dot = rectOf(e, false, s)
+      const blocker = grid.hit(dot)
+      if (!blocker) {
+        grid.add(dot)
+        next.set(e.id, { mode: 'dot', hidden: 0 })
+      } else {
+        next.set(e.id, { mode: 'hidden', hidden: 0 })
+        if (blocker !== UI_OWNER) next.get(blocker)!.hidden++
+      }
+    }
+
+    placement.current = next
+    for (const e of eventsById.current.values()) {
+      const ent = coll.getById(e.id)
+      if (ent) applyGraphics(ent, e)
+    }
   }
 
   // ---- create the viewer once ----
@@ -349,43 +275,54 @@ export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion }: 
     viewer.scene.screenSpaceCameraController.minimumZoomDistance = 500
     viewer.camera.setView({ destination: homeDestination(viewer.canvas) })
 
-    const source = new CustomDataSource('events')
-    source.clustering.enabled = true
-    source.clustering.pixelRange = 18
-    source.clustering.minimumClusterSize = 2
-    source.clustering.clusterEvent.addEventListener((entities, cluster) => {
-      // Lead the cluster with its most notable member that has a photo.
-      const members = [...new Map(entities.map((e) => [e.id, e])).values()]
-      let lead: Entity | undefined
-      let best = -1
-      for (const ent of members) {
-        const sl = eventsById.current.get(ent.id)?.sitelinks ?? 0
-        if (sl > best && bubbleImages.current.has(ent.id)) {
-          best = sl
-          lead = ent
-        }
+    const onCameraStop = () => {
+      onCameraHeightRef.current?.(viewer.camera.positionCartographic.height)
+      dirty.current = true
+    }
+    viewer.camera.moveEnd.addEventListener(onCameraStop)
+    // Re-place markers after each rendered frame when the view or the data
+    // changed, at most every DECLUTTER_MS while moving.
+    let lastRun = 0
+    const lastView = new Cartesian3()
+    const lastDir = new Cartesian3()
+    // Floating UI can move (the panel slides under search results, the filter
+    // bubble expands); markers must then re-flow around it.
+    let uiCheck = 0
+    let uiSignature = ''
+    const uiMoved = (now: number) => {
+      if (now - uiCheck < 250) return false
+      uiCheck = now
+      let sig = ''
+      for (const el of document.querySelectorAll(UI_SELECTOR)) {
+        const r = el.getBoundingClientRect()
+        sig += `${r.left | 0},${r.top | 0},${r.width | 0},${r.height | 0};`
       }
-      const icon = lead
-        ? photoClusterIcon(lead.id, bubbleImages.current.get(lead.id)!, members.length)
-        : clusterIcon(members.length)
-      cluster.label.show = false
-      cluster.point.show = false
-      cluster.billboard.show = true
-      cluster.billboard.id = cluster.label.id
-      cluster.billboard.image = icon as never
-      cluster.billboard.width = icon.width / (2 * TEX)
-      cluster.billboard.height = icon.height / (2 * TEX)
-      cluster.billboard.verticalOrigin = VerticalOrigin.CENTER
+      if (sig === uiSignature) return false
+      uiSignature = sig
+      return true
+    }
+    viewer.scene.postRender.addEventListener(() => {
+      const cam = viewer.camera
+      if (uiMoved(performance.now())) dirty.current = true
+      const moved = !cam.positionWC.equalsEpsilon(lastView, 0, 1) || !cam.directionWC.equalsEpsilon(lastDir, 1e-7)
+      if (!moved && !dirty.current) return
+      const now = performance.now()
+      if (now - lastRun < DECLUTTER_MS) return
+      lastRun = now
+      Cartesian3.clone(cam.positionWC, lastView)
+      Cartesian3.clone(cam.directionWC, lastDir)
+      dirty.current = false
+      declutter()
     })
+
+    const source = new CustomDataSource('events')
     viewer.dataSources.add(source)
 
     const handler = new ScreenSpaceEventHandler(viewer.scene.canvas)
     handler.setInputAction((m: { position: Cartesian2 }) => {
       const picked = viewer.scene.pick(m.position)
       if (!defined(picked)) return onSelectRef.current(null)
-      if (Array.isArray(picked.id)) {
-        viewer.flyTo(picked.id as Entity[], { duration: 1.2 }) // cluster: zoom to members
-      } else if (picked.id instanceof Entity && eventsById.current.has(picked.id.id)) {
+      if (picked.id instanceof Entity && eventsById.current.has(picked.id.id)) {
         onSelectRef.current(picked.id.id)
       }
     }, ScreenSpaceEventType.LEFT_CLICK)
@@ -393,85 +330,78 @@ export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion }: 
       const picked = viewer.scene.pick(m.endPosition)
       const ev =
         defined(picked) && picked.id instanceof Entity ? eventsById.current.get(picked.id.id) : undefined
-      viewer.canvas.style.cursor = defined(picked) && (ev || Array.isArray(picked.id)) ? 'pointer' : ''
+      viewer.canvas.style.cursor = ev ? 'pointer' : ''
       setHover(ev ? { x: m.endPosition.x, y: m.endPosition.y, event: ev } : null)
     }, ScreenSpaceEventType.MOUSE_MOVE)
 
     viewerRef.current = viewer
     sourceRef.current = source
+    onCameraStop()
     return () => {
       handler.destroy()
       viewer.destroy()
       viewerRef.current = null
       sourceRef.current = null
-      bubbleImages.current.clear()
+      photos.current.clear()
+      applied.current.clear()
     }
   }, [])
 
-  // ---- sync markers with events (diff by id) and upgrade top events to photo bubbles ----
+  // ---- sync entities with events (diff by id) and load photo bubbles ----
   useEffect(() => {
     const source = sourceRef.current
     if (!source) return
     const next = new Map(events.map((e) => [e.id, e]))
     eventsById.current = next
     const coll = source.entities
+    const byNotability = [...events].sort((a, b) => b.sitelinks - a.sitelinks)
+
+    const wantPhoto = new Set(
+      byNotability
+        .filter((e) => getThumb(e.title))
+        .slice(0, MAX_BUBBLES)
+        .map((e) => e.id),
+    )
 
     coll.suspendEvents()
     for (const ent of [...coll.values]) {
       if (!next.has(ent.id)) {
         coll.remove(ent)
-        bubbleImages.current.delete(ent.id)
+        photos.current.delete(ent.id)
+        applied.current.delete(ent.id)
+        positions.current.delete(ent.id)
       }
     }
+    // Drop photos for events that left the top set.
+    for (const id of [...photos.current.keys()]) if (!wantPhoto.has(id)) photos.current.delete(id)
     for (const e of events) {
-      if (!coll.getById(e.id)) {
-        applyGraphics(coll.add(new Entity({ id: e.id, position: Cartesian3.fromDegrees(e.lon, e.lat) })), e)
-      }
-    }
-
-    const wanted = new Set(
-      [...events]
-        .sort((a, b) => b.sitelinks - a.sitelinks)
-        .filter((e) => getThumb(e.title))
-        .slice(0, MAX_BUBBLES)
-        .map((e) => e.id),
-    )
-    // Downgrade events that dropped out of the top set back to dots.
-    for (const id of [...bubbleImages.current.keys()]) {
-      const ent = coll.getById(id)
-      const e = next.get(id)
-      if (!wanted.has(id) && ent && e) {
-        bubbleImages.current.delete(id)
-        applyGraphics(ent, e)
-      }
+      if (coll.getById(e.id)) continue
+      const position = Cartesian3.fromDegrees(e.lon, e.lat)
+      positions.current.set(e.id, position)
+      coll.add(new Entity({ id: e.id, position, show: false })) // shown once placed
     }
     coll.resumeEvents()
+    dirty.current = true
 
-    for (const id of wanted) {
-      if (bubbleImages.current.has(id)) continue
+    for (const id of wantPhoto) {
+      if (photos.current.has(id)) continue
       const e = next.get(id)!
-      photoBubble(getThumb(e.title)!, CATEGORY_META[e.category].color)
-        .then((img) => {
+      const url = getThumb(e.title)!
+      loadPhoto(url)
+        .then((canvas) => {
           const ent = coll.getById(id)
           if (!ent || eventsById.current.get(id) !== e) return
-          bubbleImages.current.set(id, img)
-          applyGraphics(ent, e)
+          photos.current.set(id, { key: url, canvas })
+          dirty.current = true
         })
         .catch(() => {}) // keep the dot if the image can't be loaded
     }
-  }, [events, thumbVersion])
+  }, [events, thumbVersion]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- highlight the selected event ----
   useEffect(() => {
-    const coll = sourceRef.current?.entities
-    if (!coll) return
-    for (const id of new Set([prevSelected.current, selectedId])) {
-      const ent = id ? coll.getById(id) : undefined
-      const e = id ? eventsById.current.get(id) : undefined
-      if (ent && e) applyGraphics(ent, e)
-    }
-    prevSelected.current = selectedId
-  }, [selectedId, events])
+    dirty.current = true // the selected (or hovered) event is placed first, larger, with its full name
+  }, [selectedId, highlightId])
 
   // ---- fly to the selected event ----
   useEffect(() => {
@@ -481,6 +411,12 @@ export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion }: 
     const height = Math.min(Math.max(viewer.camera.positionCartographic.height * 0.5, 4e5), 2.5e6)
     viewer.camera.flyTo({ destination: Cartesian3.fromDegrees(ev.lon, ev.lat, height), duration: 1.6 })
   }, [flyNonce]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---- fly to a place ----
+  useEffect(() => {
+    if (!focus) return
+    viewerRef.current?.camera.flyTo({ destination: Cartesian3.fromDegrees(focus.lon, focus.lat, focus.height), duration: 2 })
+  }, [focus?.nonce]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const flyHome = () =>
     viewerRef.current &&

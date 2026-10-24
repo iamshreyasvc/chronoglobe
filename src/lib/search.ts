@@ -1,6 +1,7 @@
 import type { HistEvent } from '../types'
 import { categoryForClasses } from './categories'
 import { parseWikidataYear } from './years'
+import { placeRadiusKm, type Place } from './places'
 
 export interface SearchHit {
   event: HistEvent
@@ -8,11 +9,19 @@ export interface SearchHit {
   thumbnail?: string
 }
 
+export interface SearchResults {
+  places: Place[]
+  events: SearchHit[]
+}
+
 // Global search: Wikipedia full-text search finds the articles, then one
-// Wikidata query resolves each article's date and place. Articles without a
-// date and a mappable place (people, concepts, lists…) are dropped.
+// Wikidata query resolves each article's date and place. Articles that are
+// places (Wikipedia gives their coordinate type: city, country, …) become place
+// results; articles without a date and a mappable place (people, concepts,
+// lists…) are dropped.
 
 const DATE_PROPS = ['P585', 'P580', 'P619', 'P606', 'P1619', 'P575', 'P571']
+const INCEPTION = DATE_PROPS.indexOf('P571')
 // Most to least precise place: own coordinates, location, start point (launch
 // sites), administrative area, then the country as a last resort.
 const PLACE_PROPS = ['wdt:P625', 'wdt:P276/wdt:P625', 'wdt:P1427/wdt:P625', 'wdt:P131/wdt:P625', 'wdt:P17/wdt:P625']
@@ -23,6 +32,7 @@ interface WikiPage {
   description?: string
   thumbnail?: { source: string }
   pageprops?: { wikibase_item?: string }
+  coordinates?: { lat: number; lon: number; type?: string; dim?: number }[]
 }
 
 function parsePoint(wkt: string | undefined): [number, number] | null {
@@ -36,7 +46,8 @@ async function searchWikipedia(q: string, signal: AbortSignal): Promise<WikiPage
     generator: 'search',
     gsrsearch: q,
     gsrlimit: '20',
-    prop: 'pageprops|pageimages|description',
+    prop: 'pageprops|pageimages|description|coordinates',
+    coprop: 'type|dim',
     ppprop: 'wikibase_item',
     piprop: 'thumbnail',
     pithumbsize: '250',
@@ -69,10 +80,11 @@ async function resolveEvents(qids: string[], signal: AbortSignal) {
   })
   if (!res.ok) throw new Error(`Wikidata lookup failed (${res.status})`)
   const j = await res.json()
-  const out = new Map<string, Omit<HistEvent, 'title'>>()
+  const out = new Map<string, Omit<HistEvent, 'title'> & { onlyInception: boolean }>()
   for (const b of j.results.bindings as Record<string, { value: string } | undefined>[]) {
     const id = b.item!.value.split('/').pop()!
-    const date = dateVars.map((v) => b[`${v.slice(1)}x`]?.value).find(Boolean)
+    const dateIdx = dateVars.findIndex((v) => b[`${v.slice(1)}x`]?.value)
+    const date = dateIdx >= 0 ? b[`${dateVars[dateIdx].slice(1)}x`]!.value : undefined
     const point = placeVars.map((v) => parsePoint(b[`${v.slice(1)}x`]?.value)).find(Boolean)
     if (!date || !point) continue
     const year = parseWikidataYear(date)
@@ -85,23 +97,46 @@ async function resolveEvents(qids: string[], signal: AbortSignal) {
       lat: point[1],
       category: categoryForClasses((b.classes?.value ?? '').split(',')),
       sitelinks: parseInt(b.sitelinks?.value ?? '0', 10),
+      onlyInception: dateIdx === INCEPTION,
     })
   }
   return out
 }
 
-export async function searchEvents(q: string, signal: AbortSignal): Promise<SearchHit[]> {
+export async function searchAll(q: string, signal: AbortSignal): Promise<SearchResults> {
   const pages = (await searchWikipedia(q, signal)).filter((p) => p.pageprops?.wikibase_item)
-  if (!pages.length) return []
+  if (!pages.length) return { places: [], events: [] }
   const resolved = await resolveEvents(
     pages.map((p) => p.pageprops!.wikibase_item!),
     signal,
   )
-  const hits: SearchHit[] = []
+  const places: Place[] = []
+  const events: SearchHit[] = []
   for (const p of pages) {
-    const e = resolved.get(p.pageprops!.wikibase_item!)
-    if (!e) continue
-    hits.push({ event: { ...e, title: p.title }, description: p.description, thumbnail: p.thumbnail?.source })
+    if (/^(List|Lists|Timeline|Outline|Index) of /.test(p.title)) continue // overview articles, not places or events
+    const qid = p.pageprops!.wikibase_item!
+    const coord = p.coordinates?.[0]
+    const e = resolved.get(qid)
+    // A page is a place when it has coordinates but no event date. A founding
+    // date alone (cities, countries) doesn't make it an event; a real event
+    // date wins even if Wikipedia tags the coordinates as a city (Paris Commune).
+    const isPlace = coord && coord.type !== 'event' && (!e || e.onlyInception)
+    if (isPlace) {
+      places.push({
+        id: qid,
+        title: p.title,
+        description: p.description,
+        thumbnail: p.thumbnail?.source,
+        lat: coord.lat,
+        lon: coord.lon,
+        kind: coord.type,
+        radiusKm: placeRadiusKm(coord.type, coord.dim),
+      })
+    } else if (e && !e.onlyInception) {
+      // A founding date alone (clubs, companies, schools) isn't a historical event.
+      const { onlyInception: _, ...event } = e
+      events.push({ event: { ...event, title: p.title }, description: p.description, thumbnail: p.thumbnail?.source })
+    }
   }
-  return hits.slice(0, 10)
+  return { places: places.slice(0, 4), events: events.slice(0, 8) }
 }

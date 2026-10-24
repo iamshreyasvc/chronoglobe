@@ -3,18 +3,25 @@ import { createPortal } from 'react-dom'
 import type { HistEvent } from '../types'
 import { CATEGORY_META } from '../lib/categories'
 import { fetchMedia, fetchSummary, getThumb, type WikiImage, type WikiSummary } from '../lib/wikipedia'
-import { formatEventDate, formatYear } from '../lib/years'
+import { formatEventDate } from '../lib/years'
+import { PeriodView } from './PeriodView'
 
 interface Props {
   events: HistEvent[]
+  /** List heading; defaults to "In this period" */
+  title?: string
+  /** Line under the heading, e.g. "1939 – 1945 · 306 events" */
+  subtitle: string
+  /** Sort by date instead of notability */
+  chronological?: boolean
+  /** Hovering an event in the list highlights it on the globe */
+  onHover: (id: string | null) => void
   selected: HistEvent | null
   onSelect: (id: string | null, fly: boolean) => void
   thumbVersion: number
   collapsed: boolean
   onToggleCollapsed: () => void
 }
-
-const LIST_LIMIT = 150
 
 function Detail({ event, onClose }: { event: HistEvent; onClose: () => void }) {
   const [summary, setSummary] = useState<WikiSummary | null>(null)
@@ -119,9 +126,7 @@ function Detail({ event, onClose }: { event: HistEvent; onClose: () => void }) {
   )
 }
 
-export function EventPanel({ events, selected, onSelect, thumbVersion, collapsed, onToggleCollapsed }: Props) {
-  const list = useMemo(() => [...events].sort((a, b) => b.sitelinks - a.sitelinks).slice(0, LIST_LIMIT), [events])
-
+export function EventPanel({ events, title, subtitle, chronological, selected, onSelect, onHover, thumbVersion, collapsed, onToggleCollapsed }: Props) {
   void thumbVersion // re-render when thumbnails arrive
 
   return (
@@ -132,42 +137,14 @@ export function EventPanel({ events, selected, onSelect, thumbVersion, collapsed
       {selected ? (
         <Detail key={selected.id} event={selected} onClose={() => onSelect(null, false)} />
       ) : (
-        <div className="list-view">
-          <header className="list-header">
-            <h2>In this period</h2>
-            <p className="muted">
-              {events.length} event{events.length === 1 ? '' : 's'} · most notable first
-            </p>
-          </header>
-          {list.length === 0 ? (
-            <div className="empty">
-              <div className="empty-bubble">🌍</div>
-              <p className="muted">No events here yet. Widen the timeline or wait for results to load.</p>
-            </div>
-          ) : (
-            <ul className="event-list">
-              {list.map((e) => {
-                const thumb = getThumb(e.title)
-                const color = CATEGORY_META[e.category].color
-                return (
-                  <li key={e.id}>
-                    <button className="event-card" onClick={() => onSelect(e.id, true)}>
-                      <span className="thumb-bubble" style={{ '--chip': color } as React.CSSProperties}>
-                        {thumb ? <img src={thumb} alt="" loading="lazy" /> : <span className="dot" />}
-                      </span>
-                      <span className="event-card-text">
-                        <strong>{e.title}</strong>
-                        <span className="muted">
-                          {formatYear(e.year)} · {CATEGORY_META[e.category].label}
-                        </span>
-                      </span>
-                    </button>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
-        </div>
+        <PeriodView
+          events={events}
+          title={title ?? 'In this period'}
+          subtitle={subtitle}
+          chronological={chronological}
+          onSelect={onSelect}
+          onHover={onHover}
+        />
       )}
     </aside>
   )

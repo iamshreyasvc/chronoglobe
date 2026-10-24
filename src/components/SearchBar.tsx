@@ -1,15 +1,31 @@
 import { useEffect, useRef, useState } from 'react'
 import { CATEGORY_META } from '../lib/categories'
-import { searchEvents, type SearchHit } from '../lib/search'
+import { searchAll, type SearchHit } from '../lib/search'
+import type { Place } from '../lib/places'
 import { formatYear } from '../lib/years'
 
 interface Props {
   onPick: (hit: SearchHit) => void
+  onPickPlace: (place: Place) => void
 }
 
-export function SearchBar({ onPick }: Props) {
+type Result = { kind: 'place'; place: Place } | { kind: 'event'; hit: SearchHit }
+
+const PLACE_KIND: Record<string, string> = {
+  city: 'City',
+  country: 'Country',
+  adm1st: 'Region',
+  adm2nd: 'Region',
+  adm3rd: 'District',
+  landmark: 'Landmark',
+  isle: 'Island',
+  mountain: 'Mountain',
+  waterbody: 'Water',
+}
+
+export function SearchBar({ onPick, onPickPlace }: Props) {
   const [q, setQ] = useState('')
-  const [hits, setHits] = useState<SearchHit[]>([])
+  const [hits, setHits] = useState<Result[]>([])
   const [status, setStatus] = useState<'idle' | 'loading' | 'done' | 'error'>('idle')
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState(0)
@@ -26,13 +42,16 @@ export function SearchBar({ onPick }: Props) {
     const ctrl = new AbortController()
     const t = setTimeout(() => {
       setStatus('loading')
-      searchEvents(term, ctrl.signal).then(
-        (h) => {
-          setHits(h)
+      searchAll(term, ctrl.signal).then(
+        ({ places, events }) => {
+          setHits([
+            ...places.map((place): Result => ({ kind: 'place', place })),
+            ...events.map((hit): Result => ({ kind: 'event', hit })),
+          ])
           setActive(0)
           setStatus('done')
         },
-        (e) => {
+        (e: Error) => {
           if (e.name !== 'AbortError') setStatus('error')
         },
       )
@@ -64,8 +83,9 @@ export function SearchBar({ onPick }: Props) {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  const pick = (h: SearchHit) => {
-    onPick(h)
+  const pick = (r: Result) => {
+    if (r.kind === 'place') onPickPlace(r.place)
+    else onPick(r.hit)
     setOpen(false)
     inputRef.current?.blur()
   }
@@ -97,7 +117,7 @@ export function SearchBar({ onPick }: Props) {
         <input
           ref={inputRef}
           value={q}
-          placeholder="Search any historical event…"
+          placeholder="Search events or places…"
           aria-label="Search historical events"
           role="combobox"
           aria-expanded={showDropdown}
@@ -123,32 +143,68 @@ export function SearchBar({ onPick }: Props) {
           {status === 'done' && hits.length === 0 && (
             <p className="search-note">No dated, mappable events found for “{q.trim()}”.</p>
           )}
-          {hits.map((h, i) => {
+          {hits.map((r, i) => {
+            const header =
+              i === 0 || r.kind !== hits[i - 1].kind ? (
+                <p className="search-section">{r.kind === 'place' ? 'Places · explore their history' : 'Events'}</p>
+              ) : null
+            const common = {
+              role: 'option',
+              'aria-selected': i === active,
+              className: `search-hit${i === active ? ' is-active' : ''}`,
+              onPointerEnter: () => setActive(i),
+              onClick: () => pick(r),
+            } as const
+            if (r.kind === 'place') {
+              const p = r.place
+              return (
+                <div key={`p${p.id}`} className="search-group">
+                  {header}
+                  <button {...common}>
+                    <span className="thumb-bubble place-bubble">
+                      {p.thumbnail ? <img src={p.thumbnail} alt="" /> : <PinIcon />}
+                      {p.thumbnail && <span className="place-pin"><PinIcon /></span>}
+                    </span>
+                    <span className="search-hit-text">
+                      <strong>{p.title}</strong>
+                      <span className="muted">
+                        {[p.kind && PLACE_KIND[p.kind], p.description].filter(Boolean).join(' · ') || 'Place'}
+                      </span>
+                    </span>
+                  </button>
+                </div>
+              )
+            }
+            const h = r.hit
             const meta = CATEGORY_META[h.event.category]
             return (
-              <button
-                key={h.event.id}
-                role="option"
-                aria-selected={i === active}
-                className={`search-hit${i === active ? ' is-active' : ''}`}
-                onPointerEnter={() => setActive(i)}
-                onClick={() => pick(h)}
-              >
-                <span className="thumb-bubble" style={{ '--chip': meta.color } as React.CSSProperties}>
-                  {h.thumbnail ? <img src={h.thumbnail} alt="" /> : <span className="dot" />}
-                </span>
-                <span className="search-hit-text">
-                  <strong>{h.event.title}</strong>
-                  <span className="muted">
-                    {formatYear(h.event.year)}
-                    {h.description ? ` · ${h.description}` : ''}
+              <div key={`e${h.event.id}`} className="search-group">
+                {header}
+                <button {...common}>
+                  <span className="thumb-bubble" style={{ '--chip': meta.color } as React.CSSProperties}>
+                    {h.thumbnail ? <img src={h.thumbnail} alt="" /> : <span className="dot" />}
                   </span>
-                </span>
-              </button>
+                  <span className="search-hit-text">
+                    <strong>{h.event.title}</strong>
+                    <span className="muted">
+                      {formatYear(h.event.year)}
+                      {h.description ? ` · ${h.description}` : ''}
+                    </span>
+                  </span>
+                </button>
+              </div>
             )
           })}
         </div>
       )}
     </div>
+  )
+}
+
+function PinIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden>
+      <path d="M12 2a7 7 0 0 0-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z" />
+    </svg>
   )
 }

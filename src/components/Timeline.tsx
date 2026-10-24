@@ -21,6 +21,10 @@ interface Props {
   onSpeed: (s: number) => void
   status: string
   loading: boolean
+  /** Years to tick on the track (a place's events) */
+  marks?: number[]
+  /** Year of the tick to highlight */
+  activeMark?: number
 }
 
 type Drag = { kind: 'from' | 'to' } | { kind: 'move'; startYear: number; orig: YearRange }
@@ -57,7 +61,7 @@ function YearField({ value, onCommit, label }: { value: number; onCommit: (y: nu
   )
 }
 
-export function Timeline({ range, onChange, playing, onTogglePlay, speed, onSpeed, status, loading }: Props) {
+export function Timeline({ range, onChange, playing, onTogglePlay, speed, onSpeed, status, loading, marks, activeMark }: Props) {
   const trackRef = useRef<HTMLDivElement>(null)
   const drag = useRef<Drag | null>(null)
 
@@ -146,6 +150,13 @@ export function Timeline({ range, onChange, playing, onTogglePlay, speed, onSpee
             >
               <span>{era.name}</span>
             </div>
+          ))}
+          {marks?.map((y, i) => (
+            <span
+              key={i}
+              className={`mark${y === activeMark ? ' is-active' : ''}`}
+              style={{ left: `${yearToPos(y) * 100}%` }}
+            />
           ))}
           <div className="selection" style={{ left: `${pFrom}%`, width: `${Math.max(pTo - pFrom, 0.4)}%` }} onPointerDown={onPointerDown('move')} />
           <div

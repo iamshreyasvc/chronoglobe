@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   ArcGisMapServerImageryProvider,
+  Color,
   BillboardGraphics,
   Cartesian2,
   Cartesian3,
@@ -18,6 +19,7 @@ import {
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
   Terrain,
+  UrlTemplateImageryProvider,
   VerticalOrigin,
   Viewer,
   defined,
@@ -41,7 +43,7 @@ const SPACING = 3
 /** Minimum time between collision passes while the camera moves */
 const DECLUTTER_MS = 100
 /** Floating UI that markers must not peek out from under */
-const UI_SELECTOR = '.brand-menu, .filter-bubble, .home-button, .search-bar, .search-results, .place-chip, .panel, .timeline'
+const UI_SELECTOR = '.brand-menu, .filter-bubble, .dark-toggle, .home-button, .search-bar, .search-results, .place-chip, .panel, .timeline'
 const UI_OWNER = '__ui'
 
 type Placement = { mode: 'full' | 'dot' | 'hidden'; hidden: number }
@@ -98,6 +100,8 @@ interface Props {
   thumbVersion: number
   /** Camera height in meters, reported when the camera stops moving */
   onCameraHeight?: (h: number) => void
+  /** Dark mode: night lights from afar, a dark map up close */
+  dark?: boolean
   /** Visible area in degrees, reported when the camera stops moving */
   onViewChange?: (rect: ViewRect) => void
   /** Event to emphasize (hovered in the side panel) */
@@ -128,7 +132,7 @@ function homeDestination(canvas: HTMLCanvasElement): Cartesian3 {
   return Cartesian3.fromDegrees(15, 30, height)
 }
 
-export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion, onCameraHeight, focus, highlightId, onViewChange }: Props) {
+export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion, onCameraHeight, focus, highlightId, onViewChange, dark = false }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
   const sourceRef = useRef<CustomDataSource | null>(null)
@@ -253,6 +257,8 @@ export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion, on
 
   // ---- intro: the globe button divides off the search bar, then the globe rises in ----
   const homeRef = useRef<HTMLButtonElement>(null)
+  /** Dark-mode imagery layers, created on first use per viewer */
+  const darkLayers = useRef<ImageryLayer[] | null>(null)
   useLayoutEffect(() => {
     divideFrom(homeRef.current, rememberedRect('search'), INTRO.home)
     riseIn(containerRef.current, INTRO.globe)
@@ -364,6 +370,7 @@ export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion, on
       sourceRef.current = null
       photos.current.clear()
       applied.current.clear()
+      darkLayers.current = null // they belonged to this viewer
     }
   }, [])
 
@@ -431,6 +438,47 @@ export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion, on
     const height = Math.min(Math.max(viewer.camera.positionCartographic.height * 0.5, 4e5), 2.5e6)
     viewer.camera.flyTo({ destination: Cartesian3.fromDegrees(ev.lon, ev.lat, height), duration: 1.6 })
   }, [flyNonce]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---- dark mode: swap imagery and dim the atmosphere ----
+  // Two layers, created on first use and kept: a crisp dark-grey map (Esri
+  // Dark Gray Canvas) for every zoom, and NASA's Black Marble night lights on
+  // top while zoomed out. Black Marble only goes to zoom level 8, so it hands
+  // over to the dark map before it would turn blurry.
+  useEffect(() => {
+    const viewer = viewerRef.current
+    if (!viewer) return
+    const layers = viewer.imageryLayers
+    if (dark && !darkLayers.current) {
+      const map = ImageryLayer.fromProviderAsync(
+        ArcGisMapServerImageryProvider.fromUrl(
+          'https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer',
+        ),
+        {},
+      )
+      const night = new ImageryLayer(
+        new UrlTemplateImageryProvider({
+          url: 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Black_Marble/default/2016-01-01/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png',
+          maximumLevel: 8,
+          credit: 'NASA Black Marble (VIIRS)',
+        }),
+        { alpha: 0.95, contrast: 1.15, maximumTerrainLevel: 8 },
+      )
+      layers.add(map)
+      layers.add(night)
+      darkLayers.current = [map, night]
+    }
+    const base = layers.get(0)
+    if (base) base.show = !dark
+    darkLayers.current?.forEach((l) => (l.show = dark))
+    const sky = viewer.scene.skyAtmosphere
+    if (sky) {
+      sky.brightnessShift = dark ? -0.35 : 0
+      sky.saturationShift = dark ? -0.35 : 0
+    }
+    // The ground atmosphere adds a blue haze that washes out the night side.
+    viewer.scene.globe.showGroundAtmosphere = !dark
+    viewer.scene.globe.baseColor = dark ? Color.fromCssColorString('#05070d') : Color.BLUE
+  }, [dark])
 
   // ---- fly to a place ----
   useEffect(() => {

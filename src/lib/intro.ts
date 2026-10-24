@@ -18,6 +18,7 @@ export const INTRO = {
   search: { at: 450, duration: 1050 },
   panel: { at: 1350, duration: 1100 },
   filter: { at: 1450, duration: 900 },
+  darkToggle: { at: 1520, duration: 880 },
   home: { at: 1600, duration: 850 },
   // Starts once the panel has fully formed (panel.at + panel.duration).
   timeline: { at: 2450, duration: 1150 },

@@ -34,6 +34,8 @@ World Imagery is used.
   for the current time range, not just the period's globally notable ones.
 - Hover the logo: it stretches into a pill with the name, then an About panel drops down: how to use it, your (guest) account and cache, and
   technical details (versions, data sources, what's loaded).
+- **Dark mode** (the moon toggle): NASA Black Marble night lights from afar, Esri's dark-grey
+  map up close. Remembered between visits.
 - Category filters tucked into a glass bubble beside the globe button, a Liquid Glass UI,
   and a phone layout with a bottom sheet.
 

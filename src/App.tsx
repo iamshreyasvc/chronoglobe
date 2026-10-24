@@ -46,6 +46,21 @@ export default function App() {
   const [enabled, setEnabled] = useState<Set<Category>>(() => new Set(CATEGORIES))
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [flyNonce, setFlyNonce] = useState(0)
+  // Dark mode for the globe, remembered between visits.
+  const [darkGlobe, setDarkGlobe] = useState(() => {
+    try {
+      return localStorage.getItem('chronoglobe-dark-globe') === '1'
+    } catch {
+      return false
+    }
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem('chronoglobe-dark-globe', darkGlobe ? '1' : '0')
+    } catch {
+      /* storage unavailable: just don't remember */
+    }
+  }, [darkGlobe])
   /** Event hovered in the side panel, highlighted on the globe */
   const [hoverId, setHoverId] = useState<string | null>(null)
   // On phones the list starts tucked away so the globe is visible.
@@ -84,6 +99,7 @@ export default function App() {
     // Long bars pour out like a dropdown; small controls bud off as round cells.
     flowFrom(panel, searchRect ?? null, INTRO.panel)
     divideFrom(q('.filter-bubble'), searchRect ?? null, INTRO.filter)
+    divideFrom(q('.dark-toggle'), searchRect ?? null, INTRO.darkToggle)
     flowFrom(q('.timeline'), panelRect ?? null, INTRO.timeline)
   }, [])
   useEffect(() => {
@@ -298,6 +314,7 @@ export default function App() {
           focus={focus}
           highlightId={hoverId}
           onViewChange={(r) => (viewRect.current = r)}
+          dark={darkGlobe}
         />
       </Suspense>
 
@@ -311,6 +328,18 @@ export default function App() {
         onToggle={toggleCategory}
         onShowAll={() => setEnabled(new Set(CATEGORIES))}
       />
+
+      <button
+        className={`glass glass-button dark-toggle${darkGlobe ? ' is-on' : ''}`}
+        onClick={() => setDarkGlobe((d) => !d)}
+        aria-pressed={darkGlobe}
+        aria-label={darkGlobe ? 'Switch the globe to satellite view' : 'Switch the globe to dark mode'}
+        title={darkGlobe ? 'Satellite view' : 'Dark mode'}
+      >
+        <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" />
+        </svg>
+      </button>
 
       <div className="search-stack" ref={stackRef}>
         <SearchBar onPick={pickSearchHit} onPickPlace={pickPlace} />

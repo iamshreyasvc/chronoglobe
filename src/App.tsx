@@ -1,13 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { Category, YearRange } from './types'
+import type { Category, HistEvent, YearRange } from './types'
 import { CATEGORIES } from './lib/categories'
-import { MAX_YEAR } from './lib/years'
+import { MAX_YEAR, MIN_YEAR } from './lib/years'
+import { setThumb } from './lib/wikipedia'
+import type { SearchHit } from './lib/search'
 import { useEvents } from './hooks/useEvents'
 import { useThumbs } from './hooks/useThumbs'
 import { Globe } from './components/Globe'
 import { Timeline } from './components/Timeline'
 import { EventPanel } from './components/EventPanel'
 import { CategoryFilter } from './components/CategoryFilter'
+import { Brand } from './components/Brand'
+import { SearchBar } from './components/SearchBar'
 
 const THUMB_COUNT = 150
 
@@ -18,12 +22,22 @@ export default function App() {
   const [enabled, setEnabled] = useState<Set<Category>>(() => new Set(CATEGORIES))
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [flyNonce, setFlyNonce] = useState(0)
-  const [panelCollapsed, setPanelCollapsed] = useState(false)
+  // On phones the list starts tucked away so the globe is visible.
+  const [panelCollapsed, setPanelCollapsed] = useState(() => window.matchMedia('(max-width: 820px)').matches)
 
   const span = range.to - range.from
   const { events: all, pending, error } = useEvents(range, playing ? span * 3 + 10 : 0)
 
-  const events = useMemo(() => all.filter((e) => enabled.has(e.category)), [all, enabled])
+  // An event picked from search stays on the map even if it isn't among the
+  // notable events loaded for this period (or its category is filtered out).
+  const [pinned, setPinned] = useState<HistEvent | null>(null)
+  const events = useMemo(() => {
+    const list = all.filter((e) => enabled.has(e.category))
+    if (pinned && pinned.year >= range.from && pinned.year <= range.to && !list.some((e) => e.id === pinned.id)) {
+      list.push(pinned)
+    }
+    return list
+  }, [all, enabled, pinned, range.from, range.to])
   const counts = useMemo(() => {
     const c = Object.fromEntries(CATEGORIES.map((k) => [k, 0])) as Record<Category, number>
     for (const e of all) c[e.category]++
@@ -38,12 +52,12 @@ export default function App() {
   const thumbVersion = useThumbs(thumbTitles)
 
   // Keep the selected event even if it scrolls out of the window while playing.
-  const [selectedEvent, setSelectedEvent] = useState<(typeof all)[number] | null>(null)
+  const [selectedEvent, setSelectedEvent] = useState<HistEvent | null>(null)
   useEffect(() => {
     if (!selectedId) return setSelectedEvent(null)
-    const e = all.find((x) => x.id === selectedId)
+    const e = events.find((x) => x.id === selectedId) ?? (pinned?.id === selectedId ? pinned : undefined)
     if (e) setSelectedEvent(e)
-  }, [selectedId, all])
+  }, [selectedId, events, pinned])
 
   // Play: slide the window forward one step per tick.
   useEffect(() => {
@@ -68,6 +82,20 @@ export default function App() {
       if (fly) setFlyNonce((n) => n + 1)
     }
   }, [])
+
+  const pickSearchHit = ({ event, thumbnail }: SearchHit) => {
+    if (thumbnail) setThumb(event.title, thumbnail)
+    setPlaying(false)
+    setPinned(event)
+    // Move the window to include the event, keeping its span.
+    setRange((r) => {
+      if (event.year >= r.from && event.year <= r.to) return r
+      const span = r.to - r.from
+      const from = Math.max(MIN_YEAR, Math.min(MAX_YEAR - span, event.year - Math.floor(span / 2)))
+      return { from, to: from + span }
+    })
+    select(event.id, true)
+  }
 
   const toggleCategory = (c: Category) =>
     setEnabled((s) => {
@@ -94,15 +122,11 @@ export default function App() {
       />
 
       <header className="topbar">
-        <div className="glass brand">
-          <span className="brand-orb" />
-          <div>
-            <h1>Chronoglobe</h1>
-            <p>History from Wikipedia, mapped</p>
-          </div>
-        </div>
+        <Brand />
         <CategoryFilter enabled={enabled} counts={counts} onToggle={toggleCategory} />
       </header>
+
+      <SearchBar onPick={pickSearchHit} />
 
       <EventPanel
         events={events}

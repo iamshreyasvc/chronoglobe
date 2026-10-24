@@ -120,15 +120,7 @@ function Detail({ event, onClose }: { event: HistEvent; onClose: () => void }) {
 }
 
 export function EventPanel({ events, selected, onSelect, thumbVersion, collapsed, onToggleCollapsed }: Props) {
-  const [query, setQuery] = useState('')
-
-  const list = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    return events
-      .filter((e) => !q || e.title.toLowerCase().includes(q))
-      .sort((a, b) => b.sitelinks - a.sitelinks)
-      .slice(0, LIST_LIMIT)
-  }, [events, query])
+  const list = useMemo(() => [...events].sort((a, b) => b.sitelinks - a.sitelinks).slice(0, LIST_LIMIT), [events])
 
   void thumbVersion // re-render when thumbnails arrive
 
@@ -146,7 +138,6 @@ export function EventPanel({ events, selected, onSelect, thumbVersion, collapsed
             <p className="muted">
               {events.length} event{events.length === 1 ? '' : 's'} · most notable first
             </p>
-            <input className="search" placeholder="Search events…" value={query} onChange={(e) => setQuery(e.target.value)} />
           </header>
           {list.length === 0 ? (
             <div className="empty">

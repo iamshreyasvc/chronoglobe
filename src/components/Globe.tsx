@@ -33,6 +33,8 @@ const ION_TOKEN = import.meta.env.VITE_CESIUM_ION_TOKEN as string | undefined
 /** How many of the most notable visible events are drawn as photo bubbles. */
 const MAX_BUBBLES = 45
 const BUBBLE_PX = 54
+/** Extra texture resolution for canvas art (drawn in 2x units, stored at 3x) so it stays sharp on Retina and when scaled up near the camera. */
+const TEX = 1.5
 
 interface Props {
   events: HistEvent[]
@@ -109,8 +111,9 @@ function clusterIcon(count: number): HTMLCanvasElement {
   const pad = 8
   const r = size - pad // drawn at 2x
   const c = document.createElement('canvas')
-  c.width = c.height = size * 2
+  c.width = c.height = size * 2 * TEX
   const g = c.getContext('2d')!
+  g.scale(TEX, TEX)
   const cx = size
   dropShadow(g, cx, cx, r)
   // Keep the shadow only outside the disc so the body stays translucent.
@@ -144,8 +147,9 @@ function photoClusterIcon(id: string, photo: HTMLCanvasElement, count: number): 
   const r = BUBBLE_PX + 4 // drawn at 2x, a little larger than single bubbles
   const pad = 14
   const c = document.createElement('canvas')
-  c.width = c.height = r * 2 + pad * 2
+  c.width = c.height = (r * 2 + pad * 2) * TEX
   const g = c.getContext('2d')!
+  g.scale(TEX, TEX)
   // A second glass disc peeking out behind, so it reads as a group.
   const bx0 = pad + r + 9
   const by0 = pad + r - 7
@@ -157,7 +161,7 @@ function photoClusterIcon(id: string, photo: HTMLCanvasElement, count: number): 
   g.drawImage(photo, pad, pad, r * 2, r * 2)
   // Count badge: small dark glass pill, top-right.
   const br = 19
-  const bx = c.width - br - 3
+  const bx = c.width / TEX - br - 3
   const by = br + 3
   dropShadow(g, bx, by, br)
   g.fillStyle = 'rgba(15,23,42,0.88)'
@@ -187,8 +191,10 @@ function photoBubble(url: string, ring: string): Promise<HTMLCanvasElement> {
         const size = BUBBLE_PX // canvas is 2x the on-screen size
         const r = size - 8 // leave room for the drop shadow
         const c = document.createElement('canvas')
-        c.width = c.height = size * 2
+        c.width = c.height = size * 2 * TEX
         const g = c.getContext('2d')!
+        g.scale(TEX, TEX)
+        g.imageSmoothingQuality = 'high'
         const cx = size
         dropShadow(g, cx, cx, r)
         g.save()
@@ -246,19 +252,40 @@ function bubbleGraphics(image: HTMLCanvasElement, selected: boolean): BillboardG
   })
 }
 
-function labelGraphics(e: HistEvent, hasBubble: boolean): LabelGraphics {
+function shortTitle(t: string): string {
+  t = t.replace(/\s*\([^)]*\)$/, '') // "Battle of Himera (480 BC)" -> "Battle of Himera"
+  return t.length > 30 ? `${t.slice(0, 28).trimEnd()}…` : t
+}
+
+const LABEL_BG = Color.fromCssColorString('rgba(15,23,42,0.62)')
+const LABEL_BG_SELECTED = Color.fromCssColorString('rgba(15,23,42,0.9)')
+
+function labelGraphics(e: HistEvent, hasBubble: boolean, selected: boolean): LabelGraphics {
   return new LabelGraphics({
-    text: e.title,
-    font: '600 15px -apple-system, system-ui, sans-serif',
+    text: selected ? e.title : shortTitle(e.title),
+    // Glyphs are rasterized at the font size; draw at 2x and scale by 0.5 so text stays crisp.
+    font: selected ? '600 28px -apple-system, system-ui, sans-serif' : '500 24px -apple-system, system-ui, sans-serif',
+    scale: 0.5,
     fillColor: Color.WHITE,
-    outlineColor: Color.fromCssColorString('rgba(0,0,0,0.75)'),
-    outlineWidth: 4,
-    style: LabelStyle.FILL_AND_OUTLINE,
+    showBackground: true,
+    backgroundColor: selected ? LABEL_BG_SELECTED : LABEL_BG,
+    backgroundPadding: new Cartesian2(14, 8),
+    style: LabelStyle.FILL,
     horizontalOrigin: HorizontalOrigin.LEFT,
     verticalOrigin: VerticalOrigin.CENTER,
-    pixelOffset: new Cartesian2(hasBubble ? 44 : 16, 0),
+    // Sit just right of the marker; bubbles scale with distance, so the offset does too.
+    pixelOffset: new Cartesian2(hasBubble ? BUBBLE_PX / 2 - 2 + (selected ? 10 : 0) : 10, 0),
+    pixelOffsetScaleByDistance: hasBubble ? new NearFarScalar(1e5, 1.25, 2e7, 0.7) : undefined,
+    scaleByDistance: new NearFarScalar(1e5, 1.05, 2e7, 0.85),
     heightReference: HeightReference.CLAMP_TO_GROUND,
   })
+}
+
+/** Whole-globe view; pulled back on portrait screens so the globe fits the width. */
+function homeDestination(canvas: HTMLCanvasElement): Cartesian3 {
+  const aspect = canvas.clientWidth / Math.max(1, canvas.clientHeight)
+  const height = aspect < 1 ? 2.0e7 * Math.min(1.6, 0.6 / aspect) : 2.0e7
+  return Cartesian3.fromDegrees(15, 30, height)
 }
 
 // ---------- component ----------
@@ -275,6 +302,21 @@ export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion }: 
   const onSelectRef = useRef(onSelect)
   onSelectRef.current = onSelect
   const [hover, setHover] = useState<{ x: number; y: number; event: HistEvent } | null>(null)
+  const prevSelected = useRef<string | null>(null)
+
+  /** Set marker (photo bubble or dot) and name label for an entity. */
+  const applyGraphics = (ent: Entity, e: HistEvent) => {
+    const sel = e.id === selectedRef.current
+    const img = bubbleImages.current.get(e.id)
+    if (img) {
+      ent.point = undefined
+      ent.billboard = bubbleGraphics(img, sel)
+    } else {
+      ent.billboard = undefined
+      ent.point = pointGraphics(e, sel)
+    }
+    ent.label = labelGraphics(e, !!img, sel)
+  }
 
   // ---- create the viewer once ----
   useEffect(() => {
@@ -300,20 +342,23 @@ export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion }: 
       fullscreenButton: false,
       homeButton: false,
     })
+    // Render at the device's pixel ratio instead of CSS pixels (sharp on Retina).
+    viewer.useBrowserRecommendedResolution = false
     viewer.scene.globe.enableLighting = false
     viewer.scene.globe.depthTestAgainstTerrain = false
     viewer.scene.screenSpaceCameraController.minimumZoomDistance = 500
-    viewer.camera.setView({ destination: Cartesian3.fromDegrees(15, 35, 2.0e7) })
+    viewer.camera.setView({ destination: homeDestination(viewer.canvas) })
 
     const source = new CustomDataSource('events')
     source.clustering.enabled = true
-    source.clustering.pixelRange = 34
-    source.clustering.minimumClusterSize = 3
+    source.clustering.pixelRange = 18
+    source.clustering.minimumClusterSize = 2
     source.clustering.clusterEvent.addEventListener((entities, cluster) => {
       // Lead the cluster with its most notable member that has a photo.
+      const members = [...new Map(entities.map((e) => [e.id, e])).values()]
       let lead: Entity | undefined
       let best = -1
-      for (const ent of entities) {
+      for (const ent of members) {
         const sl = eventsById.current.get(ent.id)?.sitelinks ?? 0
         if (sl > best && bubbleImages.current.has(ent.id)) {
           best = sl
@@ -321,15 +366,15 @@ export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion }: 
         }
       }
       const icon = lead
-        ? photoClusterIcon(lead.id, bubbleImages.current.get(lead.id)!, entities.length)
-        : clusterIcon(entities.length)
+        ? photoClusterIcon(lead.id, bubbleImages.current.get(lead.id)!, members.length)
+        : clusterIcon(members.length)
       cluster.label.show = false
       cluster.point.show = false
       cluster.billboard.show = true
       cluster.billboard.id = cluster.label.id
       cluster.billboard.image = icon as never
-      cluster.billboard.width = icon.width / 2
-      cluster.billboard.height = icon.height / 2
+      cluster.billboard.width = icon.width / (2 * TEX)
+      cluster.billboard.height = icon.height / (2 * TEX)
       cluster.billboard.verticalOrigin = VerticalOrigin.CENTER
     })
     viewer.dataSources.add(source)
@@ -380,7 +425,7 @@ export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion }: 
     }
     for (const e of events) {
       if (!coll.getById(e.id)) {
-        coll.add(new Entity({ id: e.id, position: Cartesian3.fromDegrees(e.lon, e.lat), point: pointGraphics(e, false) }))
+        applyGraphics(coll.add(new Entity({ id: e.id, position: Cartesian3.fromDegrees(e.lon, e.lat) })), e)
       }
     }
 
@@ -397,9 +442,7 @@ export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion }: 
       const e = next.get(id)
       if (!wanted.has(id) && ent && e) {
         bubbleImages.current.delete(id)
-        ent.billboard = undefined
-        ent.point = pointGraphics(e, id === selectedRef.current)
-        if (ent.label) ent.label = labelGraphics(e, false)
+        applyGraphics(ent, e)
       }
     }
     coll.resumeEvents()
@@ -412,10 +455,7 @@ export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion }: 
           const ent = coll.getById(id)
           if (!ent || eventsById.current.get(id) !== e) return
           bubbleImages.current.set(id, img)
-          const sel = id === selectedRef.current
-          ent.point = undefined
-          ent.billboard = bubbleGraphics(img, sel)
-          if (sel) ent.label = labelGraphics(e, true)
+          applyGraphics(ent, e)
         })
         .catch(() => {}) // keep the dot if the image can't be loaded
     }
@@ -425,17 +465,12 @@ export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion }: 
   useEffect(() => {
     const coll = sourceRef.current?.entities
     if (!coll) return
-    for (const ent of coll.values) {
-      const e = eventsById.current.get(ent.id)
-      if (!e) continue
-      const sel = ent.id === selectedId
-      const wasSel = !!ent.label
-      if (sel === wasSel) continue
-      const img = bubbleImages.current.get(ent.id)
-      if (img) ent.billboard = bubbleGraphics(img, sel)
-      else ent.point = pointGraphics(e, sel)
-      ent.label = sel ? labelGraphics(e, !!img) : undefined
+    for (const id of new Set([prevSelected.current, selectedId])) {
+      const ent = id ? coll.getById(id) : undefined
+      const e = id ? eventsById.current.get(id) : undefined
+      if (ent && e) applyGraphics(ent, e)
     }
+    prevSelected.current = selectedId
   }, [selectedId, events])
 
   // ---- fly to the selected event ----
@@ -448,7 +483,8 @@ export function Globe({ events, selectedId, onSelect, flyNonce, thumbVersion }: 
   }, [flyNonce]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const flyHome = () =>
-    viewerRef.current?.camera.flyTo({ destination: Cartesian3.fromDegrees(15, 35, 2.0e7), duration: 1.5 })
+    viewerRef.current &&
+    viewerRef.current.camera.flyTo({ destination: homeDestination(viewerRef.current.canvas), duration: 1.5 })
 
   const hoverThumb = hover ? getThumb(hover.event.title) : null
 

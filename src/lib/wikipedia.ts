@@ -79,6 +79,13 @@ export function getThumb(title: string): string | null | undefined {
   return thumbs.get(title)
 }
 
+/** Seed a known thumbnail (e.g. from search results) without a lookup. */
+export function setThumb(title: string, url: string) {
+  if (thumbs.get(title)) return
+  thumbs.set(title, url)
+  thumbWaiters.forEach((cb) => cb())
+}
+
 export function onThumbs(cb: () => void): () => void {
   thumbWaiters.add(cb)
   return () => thumbWaiters.delete(cb)

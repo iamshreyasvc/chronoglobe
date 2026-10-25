@@ -102,11 +102,18 @@ export default function App() {
     divideFrom(q('.dark-toggle'), searchRect ?? null, INTRO.darkToggle)
     flowFrom(q('.timeline'), panelRect ?? null, INTRO.timeline)
   }, [])
+  // Likewise the About menu (left) stops above the timeline: publish its height.
   useEffect(() => {
+    const app = appRef.current
     const stack = stackRef.current
-    if (!stack) return
-    const ro = new ResizeObserver(() => appRef.current?.style.setProperty('--stack-h', `${stack.offsetHeight}px`))
+    const timeline = app?.querySelector<HTMLElement>('.timeline')
+    if (!app || !stack) return
+    const ro = new ResizeObserver(() => {
+      app.style.setProperty('--stack-h', `${stack.offsetHeight}px`)
+      if (timeline) app.style.setProperty('--timeline-h', `${timeline.offsetHeight}px`)
+    })
     ro.observe(stack)
+    if (timeline) ro.observe(timeline)
     return () => ro.disconnect()
   }, [])
   /** While true, the timeline keeps stretching to cover the place's events as they load */

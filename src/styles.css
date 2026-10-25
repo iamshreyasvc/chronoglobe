@@ -255,7 +255,8 @@ h1, h2, p { margin: 0; }
 
 /* Content: same building blocks as the right sidebar */
 .about-content {
-  max-height: calc(100dvh - var(--gap) * 2 - 46px);
+  /* End above the timeline (bottom: 22px, height measured in App) with a 12px gap. */
+  max-height: calc(100dvh - var(--gap) - 46px - var(--timeline-h, 90px) - 22px - 12px);
   overflow-y: auto; overscroll-behavior: contain;
   padding: 8px 16px 16px;
   scrollbar-width: thin;
@@ -947,6 +948,8 @@ h1, h2, p { margin: 0; }
 
   /* Row 3: timeline */
   .timeline { top: calc(var(--gap) + 104px); bottom: auto; right: var(--gap); padding: 6px 12px 2px 6px; border-radius: 24px; }
+  /* Phones: the timeline sits near the top, so the menu is an overlay that can use the full height. */
+  .about-content { max-height: calc(100dvh - var(--gap) * 2 - 46px); }
   .year-field { font-size: 16px; width: 6.6ch; }
   .timeline-status { display: none; }
   .range-readout { margin-right: auto; }
